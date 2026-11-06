@@ -1,0 +1,577 @@
+---
+title: "Case 31: Summary of Data Analysis"
+subtitle: "R1, R2, R5, and R6 | Employees Federal Credit Union"
+author: "Ruben Garcia"
+date: today
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    scrollable: true
+    smaller: true
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(haven)
+library(labelled)
+library(gt)
+
+theme_set(theme_minimal(base_size = 16))
+```
+
+```{r}
+#| label: import
+
+# Cleaned data from IC10-2-1 (keeps value labels and variable labels)
+data <- read_sav("Case 31 Data_efcu_1_RG_cleaned.sav")
+
+# Plain-number copy used for means, t-tests, and percentages
+data_numeric <- data |>
+  mutate(across(everything(), as.numeric))
+
+n_respondents <- nrow(data)
+```
+
+```{r}
+#| label: helper-distribution
+
+# Frequency table for one variable, using its value labels
+distribution_table <- function(variable_name) {
+  variable_labelled <- data[[variable_name]]
+
+  codes <- as.numeric(variable_labelled)
+  labels_text <- as.character(as_factor(variable_labelled))
+
+  raw_table <- tibble(code = codes, response = labels_text)
+  raw_table <- raw_table |>
+    mutate(response = replace_na(response, "No opinion / no answer (missing)"))
+
+  counts <- raw_table |> count(code, response)
+
+  n_valid <- sum(counts |> filter(!is.na(code)) |> pull(n))
+
+  result <- counts |>
+    mutate(
+      variable = variable_name,
+      percent_of_all = round(n / sum(n) * 100, 1),
+      percent_of_valid = if_else(is.na(code), NA_real_, round(n / n_valid * 100, 1))
+    ) |>
+    arrange(code) |>
+    select(variable, code, response, n, percent_of_all, percent_of_valid)
+
+  result
+}
+
+# Bar chart of valid-response percentages for one variable
+distribution_plot <- function(variable_name) {
+  plot_data <- distribution_table(variable_name) |>
+    filter(!is.na(code)) |>
+    mutate(response = fct_reorder(response, code))
+
+  ggplot(plot_data, aes(x = response, y = percent_of_valid)) +
+    geom_col(fill = "#1f4e79") +
+    geom_text(aes(label = paste0(round(percent_of_valid, 0), "%")), vjust = -0.4, size = 5) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(x = NULL, y = "Percent of valid responses")
+}
+
+# Pull one number out of a distribution table
+get_percent <- function(freq_table, code_value) {
+  freq_table |> filter(code == code_value) |> pull(percent_of_valid)
+}
+```
+
+```{r}
+#| label: helper-ttest
+
+# One-sample t-test against a test value (default = 3, the scale midpoint)
+one_sample_row <- function(variable_name, description, test_value = 3) {
+  all_values <- data_numeric[[variable_name]]
+  valid_values <- all_values[!is.na(all_values)]
+
+  test_result <- t.test(valid_values, mu = test_value)
+  test_tidy <- broom::tidy(test_result)
+
+  row <- tibble(
+    item = variable_name,
+    description = description,
+    n = length(valid_values),
+    mean = mean(valid_values),
+    sd = sd(valid_values),
+    percent_4_or_5 = mean(valid_values >= 4) * 100,
+    t = test_tidy |> pull(statistic),
+    df = test_tidy |> pull(parameter),
+    p = test_tidy |> pull(p.value),
+    conf_low = test_tidy |> pull(conf.low),
+    conf_high = test_tidy |> pull(conf.high)
+  )
+
+  row
+}
+
+# Add text versions of the test result for use inside parentheses
+add_report_text <- function(results) {
+  results |>
+    mutate(
+      p_text = if_else(p < .001, "p < .001", paste0("p = ", sub("^0", "", sprintf("%.3f", p)))),
+      report = paste0("t(", df, ") = ", sprintf("%.2f", t), ", ", p_text),
+      direction = if_else(mean > 3, "above", "below"),
+      sig_word = if_else(p < .05, "significantly", "not significantly")
+    )
+}
+
+# Nicely formatted results table
+show_results_table <- function(results) {
+  results |>
+    select(description, n, mean, sd, percent_4_or_5, t, p_text) |>
+    gt() |>
+    fmt_number(columns = c(mean, sd, percent_4_or_5, t), decimals = 2) |>
+    cols_label(
+      description = "Item",
+      n = "n",
+      mean = "Mean",
+      sd = "SD",
+      percent_4_or_5 = "% rating 4-5",
+      t = "t",
+      p_text = "Significance"
+    )
+}
+
+get_value <- function(results, item_name, column_name) {
+  results |> filter(item == item_name) |> pull(all_of(column_name))
+}
+```
+
+# Case Overview
+
+## Objectives and data
+
+EFCU wants to know why members are not borrowing more from the credit union. This summary covers four research questions:
+
+- **R1:** Why do people join the credit union?
+- **R2:** Why do members use other financial institutions when they borrow?
+- **R5:** How well are members aware of the services offered?
+- **R6:** What are members' attitudes about how effectively the credit union is operated?
+
+The analysis uses the cleaned survey data (n = `r n_respondents`). Missing values come from "No opinion" and "No answer" responses. Scale midpoint = 3 on 1-5 items (higher = more favorable or higher, as labeled).
+
+::: {.callout-note}
+The cleaned file does not contain Q1, Q2, Q28, Q29, or the open-ended questions. R1 and R2 therefore use the closest available survey items (see the Limitations slide).
+:::
+
+# R1: Reasons for Joining
+
+## R1 Descriptive statistics: opinion of savings rates (Q7)
+
+```{r}
+#| label: tbl-r1-freq
+#| tbl-cap: "Opinion of the rates the credit union pays on savings accounts (Q7, reversed so higher = higher rates)"
+
+r1_table <- distribution_table("q7r")
+
+r1_table |>
+  select(response, n, percent_of_all, percent_of_valid) |>
+  gt() |>
+  cols_label(
+    response = "Response",
+    n = "n",
+    percent_of_all = "% of all",
+    percent_of_valid = "% of valid"
+  )
+```
+
+## R1 Figure
+
+```{r}
+#| label: fig-r1
+#| fig-cap: "Opinion of savings rates paid by the credit union (valid responses)"
+#| fig-height: 4.5
+
+distribution_plot("q7r")
+```
+
+## R1 One-group t-test (test value = 3, "Average")
+
+```{r}
+#| label: tbl-r1-ttest
+#| tbl-cap: "One-sample t-test: Q7 savings rates vs. the midpoint of 3"
+
+r1_results <- one_sample_row("q7r", "Savings rates paid (Q7r)")
+r1_results <- add_report_text(r1_results)
+
+show_results_table(r1_results)
+```
+
+```{r}
+#| label: r1-numbers
+
+r1_pct_average <- get_percent(r1_table, 3)
+r1_pct_high <- get_percent(r1_table, 4) + get_percent(r1_table, 5)
+r1_pct_low <- get_percent(r1_table, 1) + get_percent(r1_table, 2)
+```
+
+## R1 Insight
+
+Q2 (reasons for joining) is not in the data, so the best stand-in is Q7, because "higher interest rates on savings" is one of the reasons to join.
+
+Most members, `r r1_pct_average`%, rate EFCU's savings rates as average (@tbl-r1-freq, @fig-r1). Among the rest, `r r1_pct_high`% call the rates high or very high and `r r1_pct_low`% call them low or very low. The average rating (`r round(get_value(r1_results, "q7r", "mean"), 2)`) is `r get_value(r1_results, "q7r", "sig_word")` different from the midpoint (`r get_value(r1_results, "q7r", "report")`; @tbl-r1-ttest).
+
+**Story:** savings rates are seen as ordinary, not a standout reason that members would say draws them in.
+
+# R2: Borrowing Elsewhere
+
+## R2 Descriptive statistics: loan rates (Q8) and loan-rate comparison (Q30)
+
+```{r}
+#| label: tbl-r2-freq
+#| tbl-cap: "Opinion of the rates EFCU charges members to borrow (Q8, reversed so higher = higher rates)"
+
+r2_table_q8 <- distribution_table("q8r")
+
+r2_table_q8 |>
+  select(response, n, percent_of_all, percent_of_valid) |>
+  gt() |>
+  cols_label(
+    response = "Response",
+    n = "n",
+    percent_of_all = "% of all",
+    percent_of_valid = "% of valid"
+  )
+```
+
+## R2 Figure: "EFCU loan rates are lower than other institutions" (Q30)
+
+```{r}
+#| label: fig-r2
+#| fig-cap: "Agreement that EFCU loan rates are lower than other institutions (Q30)"
+#| fig-height: 4.5
+
+distribution_plot("q30")
+```
+
+## R2 One-group t-tests (test value = 3)
+
+```{r}
+#| label: tbl-r2-ttest
+#| tbl-cap: "One-sample t-tests against the midpoint of 3"
+
+r2_results_q8 <- one_sample_row("q8r", "Loan rates charged (Q8r; higher = higher rates)")
+r2_results_q30 <- one_sample_row("q30", "EFCU loan rates lower than others (Q30)")
+
+r2_results <- bind_rows(r2_results_q8, r2_results_q30)
+r2_results <- add_report_text(r2_results)
+
+show_results_table(r2_results)
+```
+
+```{r}
+#| label: r2-numbers
+
+r2_pct_average <- get_percent(r2_table_q8, 3)
+r2_pct_high <- get_percent(r2_table_q8, 4) + get_percent(r2_table_q8, 5)
+r2_pct_low <- get_percent(r2_table_q8, 1) + get_percent(r2_table_q8, 2)
+
+r2_table_q30 <- distribution_table("q30")
+r2_pct_agree <- get_percent(r2_table_q30, 4) + get_percent(r2_table_q30, 5)
+r2_pct_disagree <- get_percent(r2_table_q30, 1) + get_percent(r2_table_q30, 2)
+r2_pct_uncertain <- get_percent(r2_table_q30, 3)
+
+r2_table_q27 <- distribution_table("q27")
+r2_pct_have_loan <- get_percent(r2_table_q27, 1)
+```
+
+## R2 Insight
+
+Q28 and Q29 (borrowing elsewhere and why) are not in the data, so I looked at how members see EFCU's loan rates, since "I found better loan rates elsewhere" is one of the Q29 reasons.
+
+About `r r2_pct_average`% of members call EFCU's loan rates average, `r r2_pct_high`% call them high, and `r r2_pct_low`% call them low (@tbl-r2-freq). The mean (`r round(get_value(r2_results, "q8r", "mean"), 2)`) is `r get_value(r2_results, "q8r", "sig_word")` different from average (`r get_value(r2_results, "q8r", "report")`). On Q30, only `r r2_pct_agree`% agree that EFCU rates are lower than other institutions, while `r r2_pct_disagree`% disagree and `r r2_pct_uncertain`% are uncertain (@fig-r2); the mean is `r get_value(r2_results, "q30", "sig_word")` different from 3 (`r get_value(r2_results, "q30", "report")`; @tbl-r2-ttest).
+
+**Story:** EFCU is not seen as a clear loan-rate leader. Members do not strongly believe its rates beat competitors, so rates alone give members little reason to stay. Only `r r2_pct_have_loan`% currently have a loan with EFCU (Q27). The survey cannot confirm *why* members borrow elsewhere.
+
+# R5: Awareness of Services
+
+## R5 Descriptive statistics: awareness and use of 14 services
+
+```{r}
+#| label: r5-prep
+
+service_labels <- var_label(select(data, q13:q26), unlist = TRUE)
+
+service_names <- tibble(
+  item = names(service_labels),
+  service = str_to_sentence(unname(service_labels))
+)
+
+awareness_numeric <- data_numeric |>
+  select(q13:q26) |>
+  mutate(respondent = row_number())
+
+awareness_long <- awareness_numeric |>
+  pivot_longer(-respondent, names_to = "item", values_to = "response")
+
+awareness_counts <- awareness_long |>
+  count(item, response)
+
+awareness_percent <- awareness_counts |>
+  mutate(percent = n / sum(n) * 100, .by = item)
+
+awareness_percent <- awareness_percent |>
+  mutate(
+    response_label = case_match(
+      response,
+      1 ~ "Aware and used",
+      2 ~ "Aware, not used",
+      3 ~ "Unaware"
+    )
+  )
+
+awareness_percent <- awareness_percent |>
+  left_join(service_names, by = "item")
+
+awareness_wide <- awareness_percent |>
+  select(item, service, response_label, percent) |>
+  pivot_wider(names_from = response_label, values_from = percent, values_fill = 0)
+
+awareness_wide <- awareness_wide |>
+  mutate(percent_aware = `Aware and used` + `Aware, not used`)
+
+# Mean of the reversed ordinal version (1 = unaware, 3 = aware and used)
+engagement_means <- data_numeric |>
+  select(q13r:q26r) |>
+  summarise(across(everything(), \(x) mean(x, na.rm = TRUE))) |>
+  pivot_longer(everything(), names_to = "item_r", values_to = "mean_engagement") |>
+  mutate(item = str_remove(item_r, "r$")) |>
+  select(item, mean_engagement)
+
+awareness_wide <- awareness_wide |>
+  left_join(engagement_means, by = "item")
+
+awareness_wide <- awareness_wide |>
+  arrange(desc(percent_aware))
+```
+
+```{r}
+#| label: tbl-r5
+#| tbl-cap: "Awareness and use of EFCU services (percent of respondents), sorted by awareness"
+
+awareness_wide |>
+  select(service, `Aware and used`, `Aware, not used`, Unaware, percent_aware, mean_engagement) |>
+  gt() |>
+  fmt_number(columns = c(`Aware and used`, `Aware, not used`, Unaware, percent_aware), decimals = 1) |>
+  fmt_number(columns = mean_engagement, decimals = 2) |>
+  cols_label(
+    service = "Service",
+    percent_aware = "Total aware (%)",
+    mean_engagement = "Engagement (1-3)"
+  )
+```
+
+## R5 Figure
+
+```{r}
+#| label: fig-r5
+#| fig-cap: "Awareness and use of EFCU services, ordered by share aware"
+#| fig-height: 6.5
+#| fig-width: 10
+
+service_order <- awareness_wide |>
+  arrange(percent_aware) |>
+  pull(service)
+
+awareness_plot_data <- awareness_percent |>
+  mutate(
+    service = factor(service, levels = service_order),
+    response_label = factor(response_label, levels = c("Unaware", "Aware, not used", "Aware and used"))
+  )
+
+ggplot(awareness_plot_data, aes(x = percent, y = service, fill = response_label)) +
+  geom_col() +
+  scale_fill_manual(values = c("Unaware" = "#c0504d", "Aware, not used" = "#a6a6a6", "Aware and used" = "#1f4e79")) +
+  labs(x = "Percent of respondents", y = NULL, fill = NULL) +
+  theme(legend.position = "top")
+```
+
+```{r}
+#| label: r5-numbers
+
+most_aware_row <- awareness_wide |> slice_max(percent_aware, n = 1, with_ties = FALSE)
+least_aware_row <- awareness_wide |> slice_min(percent_aware, n = 1, with_ties = FALSE)
+
+most_used_row <- awareness_wide |> slice_max(`Aware and used`, n = 1, with_ties = FALSE)
+least_used_row <- awareness_wide |> slice_min(`Aware and used`, n = 1, with_ties = FALSE)
+
+n_services_quarter_unaware <- awareness_wide |>
+  filter(Unaware >= 25) |>
+  nrow()
+
+n_services_majority_used <- awareness_wide |>
+  filter(`Aware and used` >= 50) |>
+  nrow()
+most_aware_service <- pull(most_aware_row, service)
+most_aware_percent <- round(pull(most_aware_row, percent_aware), 1)
+least_aware_service <- pull(least_aware_row, service)
+least_aware_percent <- round(pull(least_aware_row, percent_aware), 1)
+
+most_used_service <- pull(most_used_row, service)
+most_used_percent <- round(pull(most_used_row, `Aware and used`), 1)
+least_used_service <- pull(least_used_row, service)
+least_used_percent <- round(pull(least_used_row, `Aware and used`), 1)
+```
+
+## R5 Insight
+
+Awareness is uneven across the 14 services (@tbl-r5, @fig-r5).
+
+-- Highest awareness: **`r most_aware_service`** (`r most_aware_percent`% aware). Lowest awareness: **`r least_aware_service`** (`r least_aware_percent`% aware).
+- Most used: **`r most_used_service`** (`r most_used_percent`% have used it). Least used: **`r least_used_service`** (`r least_used_percent`%).
+- `r n_services_quarter_unaware` of 14 services have at least 25% of members who did not know the service was offered, and only `r n_services_majority_used` of 14 are used by at least half of members.
+
+**Story:** awareness is not the same as use. Services where many members are aware but have not used them are a conversion opportunity, and services with high "unaware" shares are a communication gap.
+
+# R6: Operational Effectiveness
+
+## R6 Descriptive statistics: account statements (Q9 to Q12)
+
+```{r}
+#| label: tbl-r6-freq
+#| tbl-cap: "Statement frequency, accuracy, clarity, and confidentiality (percent of valid responses)"
+
+r6_q9 <- distribution_table("q9")
+r6_q10 <- distribution_table("q10")
+r6_q11 <- distribution_table("q11")
+r6_q12 <- distribution_table("q12")
+
+r6_frequencies <- bind_rows(r6_q9, r6_q10, r6_q11, r6_q12)
+
+r6_variable_names <- c(
+  q9 = "Q9: How often statements are received",
+  q10 = "Q10: Accuracy of statements",
+  q11 = "Q11: Statements easy to understand",
+  q12 = "Q12: Account information kept confidential"
+)
+
+r6_frequencies |>
+  filter(!is.na(code)) |>
+  mutate(variable = r6_variable_names[variable]) |>
+  select(variable, response, n, percent_of_valid) |>
+  gt(groupname_col = "variable") |>
+  cols_label(response = "Response", n = "n", percent_of_valid = "% of valid")
+```
+
+## R6 Chi-square goodness-of-fit tests (Q9, Q11, Q12)
+
+```{r}
+#| label: tbl-r6-gof
+#| tbl-cap: "Chi-square goodness-of-fit tests (equal split across response options)"
+
+q9_counts <- r6_q9 |> filter(!is.na(code)) |> pull(n)
+q11_counts <- r6_q11 |> filter(!is.na(code)) |> pull(n)
+q12_counts <- r6_q12 |> filter(!is.na(code)) |> pull(n)
+
+q9_gof <- broom::tidy(chisq.test(q9_counts))
+q11_gof <- broom::tidy(chisq.test(q11_counts))
+q12_gof <- broom::tidy(chisq.test(q12_counts))
+
+gof_table <- bind_rows(
+  q9_gof |> mutate(item = "Q9: Statement frequency"),
+  q11_gof |> mutate(item = "Q11: Easy to understand"),
+  q12_gof |> mutate(item = "Q12: Confidential")
+)
+
+gof_table <- gof_table |>
+  mutate(
+    p_text = if_else(p.value < .001, "p < .001", paste0("p = ", sub("^0", "", sprintf("%.3f", p.value))))
+  )
+
+gof_table |>
+  select(item, statistic, parameter, p_text) |>
+  gt() |>
+  fmt_number(columns = statistic, decimals = 2) |>
+  cols_label(item = "Item", statistic = "Chi-square", parameter = "df", p_text = "Significance")
+```
+
+## R6 Descriptive statistics and one-group t-tests: attitude items
+
+```{r}
+#| label: tbl-r6-ttest
+#| tbl-cap: "One-sample t-tests against the midpoint of 3 (1-5 scales, higher = more favorable)"
+
+r6_results <- bind_rows(
+  one_sample_row("q31", "Q31: Personnel keep my information confidential"),
+  one_sample_row("q32", "Q32: Prompt in processing loan applications"),
+  one_sample_row("q33", "Q33: Services meet the needs of members"),
+  one_sample_row("q34", "Q34: Loan applications simple and easy"),
+  one_sample_row("q37r", "Q37: Overall management and operation (reversed)")
+)
+
+r6_results <- add_report_text(r6_results)
+
+show_results_table(r6_results)
+```
+
+## R6 Figure
+
+```{r}
+#| label: fig-r6
+#| fig-cap: "Mean rating with 95% confidence interval (dashed line = midpoint of 3)"
+#| fig-height: 4.5
+#| fig-width: 10
+
+r6_plot_data <- r6_results |>
+  mutate(description = fct_reorder(description, mean))
+
+ggplot(r6_plot_data, aes(x = mean, y = description)) +
+  geom_vline(xintercept = 3, linetype = "dashed") +
+  geom_pointrange(aes(xmin = conf_low, xmax = conf_high), color = "#1f4e79") +
+  scale_x_continuous(limits = c(2.5, 5)) +
+  labs(x = "Mean rating (1-5)", y = NULL)
+```
+
+```{r}
+#| label: r6-numbers
+
+r6_pct_about_right <- get_percent(r6_q9, 3)
+r6_pct_not_often <- get_percent(r6_q9, 4)
+
+r6_pct_accuracy_good <- get_percent(r6_q10, 1) + get_percent(r6_q10, 2)
+r6_pct_understand_yes <- get_percent(r6_q11, 1)
+r6_pct_confidential_yes <- get_percent(r6_q12, 1)
+
+r6_n_sig_above <- r6_results |>
+  filter(p < .05, mean > 3) |>
+  nrow()
+
+r6_lowest_item <- r6_results |> slice_min(mean, n = 1, with_ties = FALSE) |> pull(description)
+r6_highest_item <- r6_results |> slice_max(mean, n = 1, with_ties = FALSE) |> pull(description)
+```
+
+## R6 Insight
+
+**Statements work well** (@tbl-r6-freq). `r r6_pct_about_right`% say they receive statements about as often as they should, `r r6_pct_accuracy_good`% rate statement accuracy good or excellent, `r r6_pct_understand_yes`% find them easy to understand, and `r r6_pct_confidential_yes`% say account information is kept confidential. The split on each is far from even (@tbl-r6-gof).
+
+**Operations are rated favorably overall.** `r r6_n_sig_above` of the 5 attitude items have means significantly above the midpoint (@tbl-r6-ttest, @fig-r6). Highest: *`r r6_highest_item`*. Lowest: *`r r6_lowest_item`*.
+
+**Story:** members are satisfied with how EFCU runs the basics (statements, confidentiality, speed). The weakest areas are the ones tied to loans, which fits the board's concern about borrowing. About `r r6_pct_not_often`% would like statements more often.
+
+# Wrap-up
+
+## Limitations
+
+- The cleaned file does not include Q1, Q2, Q28, Q29, Q35, Q36, Q39, or Q40, so **R1 and R2 are answered with stand-in items** (Q7, Q8, Q30). The true reasons for joining and for borrowing elsewhere need those items.
+- Q7 (10 missing), Q8 (21 missing), and Q37 (7 missing) exclude "No opinion" or "No answer" responses.
+- Rating items are ordinal, so one-sample t-tests treat them as approximately interval.
+- The sample is small (n = `r n_respondents`) and responses cluster around the middle options on several items.
+
+## Appendix: Links
+
+Published report: [View my GitHub Pages report](https://rubencgarcia.github.io/REPO-NAME/)
+
+GitHub repo: [View my GitHub repo](https://github.com/rubencgarcia/REPO-NAME)
